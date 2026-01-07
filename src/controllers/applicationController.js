@@ -1,461 +1,449 @@
-// controllers/applicationController.js
+// controllers/applicationController.js - VERSION SIMPLIFIÉE COMPATIBLE
+
 const Application = require('../models/Application');
 const Job = require('../models/Job');
-const { catchAsync, AppError, sendResponse, getPaginationMeta } = require('../utils/helpers');
-const { 
-  uploadApplicationFiles, 
-  handleUploadError, 
-  cleanupFiles, 
-  validateApplicationWithFiles 
-} = require('../middleware/uploadMiddleware');
+const User = require('../models/User');
+const { catchAsync, AppError, sendResponse } = require('../utils/helpers');
 
-// Créer une nouvelle candidature
+// =====================================
+// CRÉER UNE NOUVELLE CANDIDATURE
+// =====================================
 const createApplication = catchAsync(async (req, res, next) => {
-  console.log('Creating application for user:', req.user._id);
-  console.log('Request body:', req.body);
-  console.log('Uploaded files:', req.files);
+  console.log('\n📝 CREATE APPLICATION:');
+  console.log('  User ID:', req.user._id);
+  console.log('  User role:', req.user.role);
+  console.log('  Job ID:', req.body.jobId);
+  console.log('  Body keys:', Object.keys(req.body));
+  console.log('  Files:', req.files ? Object.keys(req.files) : 'No files');
+
+  // À ce point, les fichiers ont déjà été validés par le middleware uploadMiddleware
+  // et les données ont été validées par validateApplicationWithFiles
+
+  // Vérifier que l'utilisateur est un candidat
+  if (req.user.role !== 'candidate') {
+    console.log('  ❌ User is not a candidate:', req.user.role);
+    return next(new AppError('Only candidates can submit applications', 403));
+  }
+
+  // Vérifier que le job existe
+  console.log('  🔍 Checking if job exists...');
+  const job = await Job.findById(req.body.jobId);
+  if (!job) {
+    console.log('  ❌ Job not found:', req.body.jobId);
+    return next(new AppError('Job not found', 404));
+  }
+
+  console.log('  ✅ Job found:', job.title);
+
+  // Vérifier si l'utilisateur a déjà postulé
+  console.log('  🔍 Checking for existing application...');
+  const existingApplication = await Application.findOne({
+    applicant: req.user._id,
+    job: req.body.jobId
+  });
+
+  if (existingApplication) {
+    console.log('  ❌ User has already applied to this job');
+    return next(new AppError('You have already applied to this job', 409));
+  }
+
+  console.log('  ✅ No existing application found');
 
   try {
-    // Extraire les données du formulaire
-    const {
-      jobId,
-      coverLetter,
-      personalInfo,
-      expectedSalary,
-      availability,
-      experience,
-      skills,
-      education,
-      languages,
-      questionnaire
-    } = req.body;
-
-    // Validation de base
-    if (!jobId) {
-      return next(new AppError('Job ID is required', 400));
-    }
-
-    if (!personalInfo) {
-      return next(new AppError('Personal information is required', 400));
-    }
-
-    // Vérifier que le job existe
-    const job = await Job.findById(jobId);
-    if (!job) {
-      return next(new AppError('Job not found', 404));
-    }
-
-    // Vérifier que l'utilisateur n'a pas déjà postulé
-    const existingApplication = await Application.findOne({
-      applicant: req.user._id,
-      job: jobId
+    // Les données personnelles ont déjà été parsées par le middleware
+    const personalInfo = req.body.personalInfo;
+    console.log('  📋 Using parsed personal information:', {
+      name: `${personalInfo.firstName} ${personalInfo.lastName}`,
+      email: personalInfo.email
     });
-
-    if (existingApplication) {
-      return next(new AppError('You have already applied for this job', 409));
-    }
-
-    // Parser les données JSON si elles sont des strings
-    let parsedPersonalInfo, parsedExpectedSalary, parsedAvailability, parsedExperience, parsedSkills, parsedEducation, parsedLanguages, parsedQuestionnaire;
-
-    try {
-      parsedPersonalInfo = typeof personalInfo === 'string' ? JSON.parse(personalInfo) : personalInfo;
-      parsedExpectedSalary = expectedSalary ? (typeof expectedSalary === 'string' ? JSON.parse(expectedSalary) : expectedSalary) : undefined;
-      parsedAvailability = availability ? (typeof availability === 'string' ? JSON.parse(availability) : availability) : undefined;
-      parsedExperience = experience ? (typeof experience === 'string' ? JSON.parse(experience) : experience) : undefined;
-      parsedSkills = skills ? (typeof skills === 'string' ? JSON.parse(skills) : skills) : undefined;
-      parsedEducation = education ? (typeof education === 'string' ? JSON.parse(education) : education) : undefined;
-      parsedLanguages = languages ? (typeof languages === 'string' ? JSON.parse(languages) : languages) : undefined;
-      parsedQuestionnaire = questionnaire ? (typeof questionnaire === 'string' ? JSON.parse(questionnaire) : questionnaire) : undefined;
-    } catch (parseError) {
-      console.error('JSON parsing error:', parseError);
-      return next(new AppError('Invalid JSON format in form data', 400));
-    }
 
     // Préparer les données de l'application
     const applicationData = {
       applicant: req.user._id,
-      job: jobId,
+      job: req.body.jobId,
       status: 'pending',
-      personalInfo: parsedPersonalInfo,
-      coverLetter: coverLetter || ''
+      personalInfo: {
+        firstName: personalInfo.firstName.trim(),
+        lastName: personalInfo.lastName.trim(),
+        email: personalInfo.email.trim(),
+        phone: personalInfo.phone.trim()
+      }
     };
 
-    // Ajouter les données optionnelles si présentes
-    if (parsedExpectedSalary) applicationData.expectedSalary = parsedExpectedSalary;
-    if (parsedAvailability) applicationData.availability = parsedAvailability;
-    if (parsedExperience) applicationData.experience = parsedExperience;
-    if (parsedSkills) applicationData.skills = parsedSkills;
-    if (parsedEducation) applicationData.education = parsedEducation;
-    if (parsedLanguages) applicationData.languages = parsedLanguages;
-    if (parsedQuestionnaire) applicationData.questionnaire = parsedQuestionnaire;
+    // Ajouter la lettre de motivation si fournie
+    if (req.body.coverLetter && req.body.coverLetter.trim()) {
+      applicationData.coverLetter = req.body.coverLetter.trim();
+      console.log('  ✅ Cover letter added');
+    }
 
-    // Gérer les fichiers uploadés
-    if (req.files) {
-      // CV
-      if (req.files.resume && req.files.resume[0]) {
-        const resumeFile = req.files.resume[0];
-        applicationData.resume = {
-          filename: resumeFile.filename,
-          originalName: resumeFile.originalname,
-          mimetype: resumeFile.mimetype,
-          size: resumeFile.size,
-          url: `/uploads/resumes/${resumeFile.filename}`
-        };
+    // Ajouter le salaire attendu si fourni
+    if (req.body.expectedSalary && !isNaN(req.body.expectedSalary)) {
+      applicationData.expectedSalary = {
+        amount: Number(req.body.expectedSalary),
+        currency: 'MAD',
+        period: 'monthly'
+      };
+      console.log('  ✅ Expected salary added:', applicationData.expectedSalary.amount);
+    }
+
+    // Ajouter la date de disponibilité si fournie
+    if (req.body.availableFrom) {
+      applicationData.availability = {
+        startDate: new Date(req.body.availableFrom)
+      };
+      console.log('  ✅ Availability date added');
+    }
+
+    // ✅ TRAITEMENT DES FICHIERS (déjà uploadés par le middleware)
+    console.log('  📁 Processing uploaded files...');
+
+    // Traiter le CV (obligatoire)
+    if (req.files && req.files.resume && req.files.resume[0]) {
+      const resumeFile = req.files.resume[0];
+      applicationData.resume = {
+        filename: resumeFile.filename,
+        originalName: resumeFile.originalname,
+        mimetype: resumeFile.mimetype,
+        size: resumeFile.size,
+        url: `/uploads/resumes/${resumeFile.filename}`
+      };
+      console.log('  ✅ Resume file processed:', resumeFile.originalname);
+    } else {
+      console.log('  ❌ No resume file found');
+      return next(new AppError('Resume file is required', 400));
+    }
+
+    // Traiter le portfolio (optionnel)
+    if (req.files && req.files.portfolio && req.files.portfolio[0]) {
+      const portfolioFile = req.files.portfolio[0];
+      applicationData.additionalDocuments = [{
+        filename: portfolioFile.filename,
+        originalName: portfolioFile.originalname,
+        mimetype: portfolioFile.mimetype,
+        size: portfolioFile.size,
+        url: `/uploads/portfolios/${portfolioFile.filename}`,
+        type: 'portfolio'
+      }];
+      console.log('  ✅ Portfolio file processed:', portfolioFile.originalname);
+    }
+
+    // Traiter les documents additionnels (optionnels)
+    if (req.files && req.files.additionalDocuments && req.files.additionalDocuments.length > 0) {
+      if (!applicationData.additionalDocuments) {
+        applicationData.additionalDocuments = [];
       }
-
-      // Portfolio - peut venir sous le nom 'portfolio' ou 'additionalDocuments'
-      const portfolioFiles = req.files.portfolio || req.files.additionalDocuments;
-      if (portfolioFiles && portfolioFiles.length > 0) {
-        applicationData.additionalDocuments = portfolioFiles.map(file => ({
+      
+      req.files.additionalDocuments.forEach(file => {
+        applicationData.additionalDocuments.push({
           filename: file.filename,
           originalName: file.originalname,
           mimetype: file.mimetype,
           size: file.size,
           url: `/uploads/portfolios/${file.filename}`,
-          type: 'portfolio'
-        }));
-      }
+          type: 'other'
+        });
+      });
+      console.log('  ✅ Additional documents processed:', req.files.additionalDocuments.length);
     }
 
-    console.log('Application data prepared:', applicationData);
+    // Ajouter des informations supplémentaires si disponibles
+    if (personalInfo.currentPosition) {
+      applicationData.experience = {
+        totalYears: personalInfo.totalExperience || 0,
+        previousPositions: [{
+          title: personalInfo.currentPosition,
+          description: personalInfo.motivation || ''
+        }]
+      };
+    }
+
+    if (personalInfo.skills) {
+      const skillsArray = personalInfo.skills.split(',').map(skill => skill.trim()).filter(Boolean);
+      applicationData.skills = skillsArray.map(skill => ({
+        name: skill,
+        level: 'intermediate' // Valeur par défaut
+      }));
+    }
+
+    console.log('  💾 Saving application to database...');
+    console.log('  Application data summary:', {
+      applicant: applicationData.applicant,
+      job: applicationData.job,
+      hasResume: !!applicationData.resume,
+      hasPortfolio: !!applicationData.additionalDocuments?.length,
+      coverLetterLength: applicationData.coverLetter?.length || 0
+    });
 
     // Créer l'application
-    const application = new Application(applicationData);
-    await application.save();
+    const application = await Application.create(applicationData);
+    console.log('  ✅ Application created successfully:', application._id);
 
-    // Populer les données pour la réponse
-    const populatedApplication = await Application.findById(application._id)
-      .populate('applicant', 'firstName lastName email')
-      .populate('job', 'title company location type');
+    // Peupler les relations pour la réponse
+    await application.populate([
+      { path: 'applicant', select: 'firstName lastName email' },
+      { path: 'job', select: 'title company location' }
+    ]);
 
-    console.log('Application created successfully:', application._id);
+    console.log('  📤 Sending success response');
 
     sendResponse(res, 201, 'success', 'Application submitted successfully', {
-      application: populatedApplication
+      application: {
+        _id: application._id,
+        status: application.status,
+        job: application.job,
+        applicant: application.applicant,
+        coverLetter: application.coverLetter,
+        resume: application.resume,
+        additionalDocuments: application.additionalDocuments,
+        createdAt: application.createdAt
+      }
     });
 
   } catch (error) {
-    console.error('Create application error:', error);
-    
-    // Supprimer les fichiers uploadés en cas d'erreur
-    if (req.files) {
-      const fs = require('fs');
-      Object.values(req.files).flat().forEach(file => {
-        try {
-          fs.unlinkSync(file.path);
-        } catch (unlinkError) {
-          console.error('Error deleting uploaded file:', unlinkError);
-        }
-      });
+    console.error('  ❌ Error creating application:', error);
+
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return next(new AppError(`Validation error: ${messages.join(', ')}`, 400));
     }
-    
+
     return next(new AppError('Failed to submit application', 500));
   }
 });
 
-// Obtenir mes candidatures
+// =====================================
+// OBTENIR MES CANDIDATURES
+// =====================================
 const getMyApplications = catchAsync(async (req, res, next) => {
-  console.log('Fetching applications for user:', req.user._id);
+  console.log('\n📋 GET MY APPLICATIONS:');
+  console.log('  User ID:', req.user._id);
+  console.log('  User role:', req.user.role);
 
-  try {
-    const {
-      status = '',
-      page = 1,
-      limit = 10,
-      sortBy = 'createdAt',
-      sortOrder = 'desc'
-    } = req.query;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const status = req.query.status;
 
-    // Filtre de base
-    const filter = { applicant: req.user._id };
+  console.log('  Query params:', { page, limit, status });
 
-    // Filtre par statut
-    if (status) {
-      filter.status = status;
-    }
-
-    // Construction du tri
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
-    // Pagination
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-
-    // Requête
-    const [applications, totalResults] = await Promise.all([
-      Application.find(filter)
-        .populate('job', 'title company location type salary status')
-        .populate({
-          path: 'job',
-          populate: {
-            path: 'company',
-            select: 'name logo'
-          }
-        })
-        .sort(sortOptions)
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      Application.countDocuments(filter)
-    ]);
-
-    // Enrichir avec des informations supplémentaires
-    const enrichedApplications = applications.map(app => ({
-      ...app,
-      daysAgo: Math.floor((new Date() - new Date(app.createdAt)) / (1000 * 60 * 60 * 24)),
-      canWithdraw: ['pending', 'reviewing'].includes(app.status)
-    }));
-
-    const pagination = getPaginationMeta(totalResults, pageNum, limitNum);
-
-    sendResponse(res, 200, 'success', 'Applications retrieved successfully', {
-      applications: enrichedApplications,
-      pagination
-    });
-
-  } catch (error) {
-    console.error('Get my applications error:', error);
-    return next(new AppError('Failed to retrieve applications', 500));
+  // Construire la requête
+  const query = { applicant: req.user._id };
+  if (status) {
+    query.status = status;
   }
+
+  console.log('  Database query:', query);
+
+  // Calculer le nombre total
+  const totalApplications = await Application.countDocuments(query);
+  console.log('  Total applications:', totalApplications);
+
+  // Récupérer les candidatures avec pagination
+  const applications = await Application.find(query)
+    .populate({
+      path: 'job',
+      select: 'title company location type salary status',
+      populate: {
+        path: 'company',
+        select: 'name logo'
+      }
+    })
+    .sort({ createdAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit);
+
+  console.log('  Applications retrieved:', applications.length);
+
+  sendResponse(res, 200, 'success', 'Applications retrieved successfully', {
+    applications,
+    pagination: {
+      current: page,
+      pages: Math.ceil(totalApplications / limit),
+      total: totalApplications,
+      limit
+    }
+  });
 });
 
-// Obtenir les candidatures pour un job (pour les employeurs)
+// =====================================
+// OBTENIR LES CANDIDATURES POUR UN JOB (EMPLOYEURS)
+// =====================================
 const getJobApplications = catchAsync(async (req, res, next) => {
-  const { jobId } = req.params;
+  console.log('\n📋 GET JOB APPLICATIONS:');
+  console.log('  User ID:', req.user._id);
+  console.log('  User role:', req.user.role);
+  console.log('  Job ID:', req.params.jobId);
 
-  console.log('Fetching applications for job:', jobId);
-
-  try {
-    // Vérifier que le job existe et appartient à l'utilisateur
-    const job = await Job.findById(jobId);
-    if (!job) {
-      return next(new AppError('Job not found', 404));
-    }
-
-    // Vérifier les permissions
-    if (job.postedBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return next(new AppError('You can only view applications for your own jobs', 403));
-    }
-
-    const {
-      status = '',
-      page = 1,
-      limit = 10,
-      sortBy = 'createdAt',
-      sortOrder = 'desc'
-    } = req.query;
-
-    // Filtre de base
-    const filter = { job: jobId };
-
-    // Filtre par statut
-    if (status) {
-      filter.status = status;
-    }
-
-    // Construction du tri
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
-    // Pagination
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-
-    // Requête
-    const [applications, totalResults] = await Promise.all([
-      Application.find(filter)
-        .populate('applicant', 'firstName lastName email profile')
-        .sort(sortOptions)
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      Application.countDocuments(filter)
-    ]);
-
-    // Enrichir avec des informations supplémentaires
-    const enrichedApplications = applications.map(app => ({
-      ...app,
-      daysAgo: Math.floor((new Date() - new Date(app.createdAt)) / (1000 * 60 * 60 * 24)),
-      compatibilityScore: app.calculateCompatibilityScore ? app.calculateCompatibilityScore(job) : 0
-    }));
-
-    const pagination = getPaginationMeta(totalResults, pageNum, limitNum);
-
-    sendResponse(res, 200, 'success', 'Job applications retrieved successfully', {
-      applications: enrichedApplications,
-      pagination,
-      job: {
-        _id: job._id,
-        title: job.title,
-        totalApplications: totalResults
-      }
-    });
-
-  } catch (error) {
-    console.error('Get job applications error:', error);
-    return next(new AppError('Failed to retrieve job applications', 500));
+  // Vérifier que le job appartient à l'employeur ou que l'utilisateur est admin
+  const job = await Job.findById(req.params.jobId);
+  if (!job) {
+    return next(new AppError('Job not found', 404));
   }
+
+  if (req.user.role !== 'admin' && job.employer.toString() !== req.user._id.toString()) {
+    return next(new AppError('You can only view applications for your own jobs', 403));
+  }
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const status = req.query.status;
+
+  const query = { job: req.params.jobId };
+  if (status) query.status = status;
+
+  const totalApplications = await Application.countDocuments(query);
+
+  const applications = await Application.find(query)
+    .populate('applicant', 'firstName lastName email profile')
+    .sort({ createdAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit);
+
+  console.log('  Job applications retrieved:', applications.length);
+
+  sendResponse(res, 200, 'success', 'Job applications retrieved successfully', {
+    applications,
+    job: {
+      _id: job._id,
+      title: job.title,
+      company: job.company
+    },
+    pagination: {
+      current: page,
+      pages: Math.ceil(totalApplications / limit),
+      total: totalApplications,
+      limit
+    }
+  });
 });
 
-// Mettre à jour le statut d'une candidature (pour les employeurs)
+// =====================================
+// METTRE À JOUR LE STATUT D'UNE CANDIDATURE (EMPLOYEURS)
+// =====================================
 const updateApplicationStatus = catchAsync(async (req, res, next) => {
-  const { id } = req.params;
-  const { status, notes = '' } = req.body;
+  console.log('\n📝 UPDATE APPLICATION STATUS:');
+  console.log('  User ID:', req.user._id);
+  console.log('  Application ID:', req.params.id);
+  console.log('  New status:', req.body.status);
 
-  console.log('Updating application status:', id, status);
+  const { status, notes } = req.body;
 
-  try {
-    // Trouver l'application et populer le job
-    const application = await Application.findById(id).populate('job');
-    if (!application) {
-      return next(new AppError('Application not found', 404));
-    }
+  const application = await Application.findById(req.params.id)
+    .populate('job', 'employer');
 
-    // Vérifier les permissions
-    if (application.job.postedBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return next(new AppError('You can only update applications for your own jobs', 403));
-    }
-
-    // Mettre à jour le statut
-    await application.updateStatus(status, notes, req.user._id);
-
-    // Recharger avec les données populées
-    const updatedApplication = await Application.findById(id)
-      .populate('applicant', 'firstName lastName email')
-      .populate('job', 'title company');
-
-    console.log('Application status updated successfully:', id);
-
-    sendResponse(res, 200, 'success', 'Application status updated successfully', {
-      application: updatedApplication
-    });
-
-  } catch (error) {
-    console.error('Update application status error:', error);
-    return next(new AppError('Failed to update application status', 500));
+  if (!application) {
+    return next(new AppError('Application not found', 404));
   }
+
+  // Vérifier les permissions
+  if (req.user.role !== 'admin' && 
+      application.job.employer.toString() !== req.user._id.toString()) {
+    return next(new AppError('You can only update applications for your own jobs', 403));
+  }
+
+  // Mettre à jour le statut
+  await application.updateStatus(status, notes, req.user._id);
+
+  console.log('  ✅ Application status updated');
+
+  sendResponse(res, 200, 'success', 'Application status updated successfully', {
+    application
+  });
 });
 
-// Retirer une candidature (pour les candidats)
+// =====================================
+// RETIRER UNE CANDIDATURE (CANDIDATS)
+// =====================================
 const withdrawApplication = catchAsync(async (req, res, next) => {
-  const { id } = req.params;
+  console.log('\n🔄 WITHDRAW APPLICATION:');
+  console.log('  User ID:', req.user._id);
+  console.log('  Application ID:', req.params.id);
 
-  console.log('Withdrawing application:', id);
+  const application = await Application.findById(req.params.id);
 
-  try {
-    // Trouver l'application
-    const application = await Application.findById(id);
-    if (!application) {
-      return next(new AppError('Application not found', 404));
-    }
-
-    // Vérifier les permissions
-    if (application.applicant.toString() !== req.user._id.toString()) {
-      return next(new AppError('You can only withdraw your own applications', 403));
-    }
-
-    // Vérifier que l'application peut être retirée
-    if (!['pending', 'reviewing'].includes(application.status)) {
-      return next(new AppError('This application cannot be withdrawn', 400));
-    }
-
-    // Mettre à jour le statut
-    await application.updateStatus('withdrawn', 'Application withdrawn by candidate', req.user._id);
-
-    console.log('Application withdrawn successfully:', id);
-
-    sendResponse(res, 200, 'success', 'Application withdrawn successfully', {
-      application
-    });
-
-  } catch (error) {
-    console.error('Withdraw application error:', error);
-    return next(new AppError('Failed to withdraw application', 500));
+  if (!application) {
+    return next(new AppError('Application not found', 404));
   }
+
+  // Vérifier que l'application appartient à l'utilisateur
+  if (application.applicant.toString() !== req.user._id.toString()) {
+    return next(new AppError('You can only withdraw your own applications', 403));
+  }
+
+  // Vérifier que l'application peut être retirée
+  if (['offered', 'rejected', 'withdrawn'].includes(application.status)) {
+    return next(new AppError('This application cannot be withdrawn', 400));
+  }
+
+  // Retirer l'application
+  await application.updateStatus('withdrawn', 'Application withdrawn by candidate');
+
+  console.log('  ✅ Application withdrawn');
+
+  sendResponse(res, 200, 'success', 'Application withdrawn successfully', {
+    application
+  });
 });
 
-// Obtenir les statistiques des candidatures
+// =====================================
+// OBTENIR LES STATISTIQUES DES CANDIDATURES
+// =====================================
 const getApplicationStats = catchAsync(async (req, res, next) => {
-  try {
-    let filter = {};
+  console.log('\n📊 GET APPLICATION STATS:');
+  console.log('  User ID:', req.user._id);
+  console.log('  User role:', req.user.role);
+
+  let stats;
+
+  if (req.user.role === 'candidate') {
+    // Statistiques pour les candidats
+    const applications = await Application.find({ applicant: req.user._id });
     
-    // Si c'est un candidat, seulement ses candidatures
-    if (req.user.role === 'candidate') {
-      filter.applicant = req.user._id;
-    }
-    // Si c'est un employeur, seulement les candidatures pour ses jobs
-    else if (req.user.role === 'employer') {
-      const userJobs = await Job.find({ postedBy: req.user._id }).select('_id');
+    stats = {
+      total: applications.length,
+      pending: applications.filter(app => app.status === 'pending').length,
+      reviewing: applications.filter(app => app.status === 'reviewing').length,
+      shortlisted: applications.filter(app => app.status === 'shortlisted').length,
+      interviewed: applications.filter(app => app.status === 'interviewed').length,
+      offered: applications.filter(app => app.status === 'offered').length,
+      rejected: applications.filter(app => app.status === 'rejected').length,
+      withdrawn: applications.filter(app => app.status === 'withdrawn').length
+    };
+  } else {
+    // Statistiques pour les employeurs/admins
+    const query = req.user.role === 'admin' ? {} : {};
+    
+    // Pour les employeurs, filtrer par leurs jobs
+    if (req.user.role === 'employer') {
+      const userJobs = await Job.find({ employer: req.user._id });
       const jobIds = userJobs.map(job => job._id);
-      filter.job = { $in: jobIds };
+      query.job = { $in: jobIds };
     }
-    // Les admins voient toutes les statistiques
 
-    const stats = await Application.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: null,
-          totalApplications: { $sum: 1 },
-          pendingApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
-          },
-          reviewingApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'reviewing'] }, 1, 0] }
-          },
-          shortlistedApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'shortlisted'] }, 1, 0] }
-          },
-          interviewedApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'interviewed'] }, 1, 0] }
-          },
-          offeredApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'offered'] }, 1, 0] }
-          },
-          rejectedApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'rejected'] }, 1, 0] }
-          },
-          withdrawnApplications: {
-            $sum: { $cond: [{ $eq: ['$status', 'withdrawn'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
-
-    const result = stats[0] || {
+    const statsData = await Application.getApplicationStats(query);
+    stats = statsData[0] || {
       totalApplications: 0,
       pendingApplications: 0,
       reviewingApplications: 0,
       shortlistedApplications: 0,
-      interviewedApplications: 0,
-      offeredApplications: 0,
-      rejectedApplications: 0,
-      withdrawnApplications: 0
+      rejectedApplications: 0
     };
-
-    sendResponse(res, 200, 'success', 'Application statistics retrieved successfully', {
-      stats: result
-    });
-
-  } catch (error) {
-    console.error('Get application stats error:', error);
-    return next(new AppError('Failed to retrieve application statistics', 500));
   }
+
+  console.log('  Stats calculated:', stats);
+
+  sendResponse(res, 200, 'success', 'Application statistics retrieved successfully', {
+    stats
+  });
 });
 
+// =====================================
+// EXPORTS
+// =====================================
 module.exports = {
   createApplication,
   getMyApplications,
   getJobApplications,
   updateApplicationStatus,
   withdrawApplication,
-  getApplicationStats,
-  uploadFiles: uploadApplicationFiles, // Utiliser le middleware d'upload
-  handleUploadError,
-  cleanupFiles,
-  validateApplicationWithFiles
+  getApplicationStats
 };
